@@ -1,5 +1,7 @@
 # Pixel Studio
 
+[Скачать Pixel Studio 1.1.0 для Windows x64](https://github.com/Over1inex/pixel-studio/releases/download/v1.1.0/Pixel-Studio-Windows.zip) · [Все релизы](https://github.com/Over1inex/pixel-studio/releases)
+
 Самостоятельное Windows-приложение для редактирования изображений. **Запуск: дважды нажмите `Pixel Studio.exe`.** Node.js и локальный сервер для работы не нужны. Интерфейс встроен в EXE и открывается в отдельном окне через системный Microsoft WebView2 Runtime. Сайт редактора открывать не требуется.
 
 ## Работа без интернета
