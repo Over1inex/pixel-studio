@@ -70,6 +70,24 @@ test('undo/redo restores independent layer snapshots and discards replaced futur
   assert.equal(editor.active.name, 'Branch');
 });
 
+test('resizing keeps layers and metadata, supports undo, and rejects unsafe dimensions atomically', () => {
+  const editor = createEditor(100, 80);
+  editor.addLayer('Artwork'); editor.setLayerOpacity(.5);
+  const ids = editor.layers.map(layer => layer.id);
+  editor.resizeCanvas(25, 20);
+  assert.deepEqual(editor.layers.map(layer => layer.id), ids);
+  assert.equal(editor.active.opacity, .5);
+  assert.ok(editor.layers.every(layer => layer.canvas.width === 25 && layer.canvas.height === 20));
+  editor.undo(); assert.equal(editor.width, 100); assert.equal(editor.height, 80);
+  editor.redo(); assert.equal(editor.width, 25);
+  const historyLength = editor.history.length;
+  editor.resizeCanvas(25, 20); assert.equal(editor.history.length, historyLength);
+  assert.throws(() => editor.resizeCanvas(4096, 4096));
+  assert.equal(editor.width, 25); assert.equal(editor.history.length, historyLength);
+  editor.resizeCanvas(50, 40, 'nearest');
+  assert.equal(editor.active.canvas.getContext('2d').imageSmoothingEnabled, false);
+});
+
 test('history is limited both by pixel memory and by entry count', () => {
   const large = createEditor(1024, 1024);
   for (let i = 0; i < 30; i++) large.renameLayer(large.activeId, `Layer ${i}`);

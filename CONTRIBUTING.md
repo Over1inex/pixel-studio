@@ -17,6 +17,8 @@ powershell -NoProfile -File .\desktop\build-launcher.ps1
 
 `build:desktop` собирает React-интерфейс в `desktop-ui-dist/`. Скрипт Windows загружает SDK WebView2 из официального NuGet, если его ещё нет в локальном кеше, и встраивает интерфейс и зависимости клиента в `Pixel Studio.exe`. `--self-test` проверяет runtime, ресурсы и локальное хранение сеанса без открытия окна.
 
+Тот же скрипт создаёт `Удалить Pixel Studio.exe` из `desktop/Uninstaller.cs` со встроенным `desktop/uninstall.ps1`. Его `--self-test` проверяет границы путей и наличие ресурса, не удаляя файлы. Не запускайте фактическое удаление при тестировании в рабочем каталоге. Деинсталлятор проверяет закрытие редактора, точные пути и отсутствие ссылок в дереве данных; затем отдельный скрытый процесс PowerShell удаляет файлы, включая сам деинсталлятор. Образы, проекты и репозиторий он не удаляет.
+
 Обычный запуск EXE использует встроенный интерфейс и облачный API из `desktop/DesktopApp.cs`. Встроенный адрес `https://pixel-studio.local` обслуживается нативным клиентом; это не сайт в интернете. Сетевые запросы `/api/*` проходят через нативный посредник. Перед каждой пересборкой EXE выполняйте `npm run build:desktop`, чтобы включить актуальный интерфейс.
 
 ## Проверки кода
@@ -24,6 +26,8 @@ powershell -NoProfile -File .\desktop\build-launcher.ps1
 ```powershell
 npx tsc --noEmit
 node --test tests/*.test.mjs
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test-native-cloud.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\uninstaller.test.ps1
 npm run build
 ```
 

@@ -5,7 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Windows.Forms;
 [assembly: AssemblyTitle("Pixel Studio")]
 [assembly: AssemblyDescription("Автономный редактор изображений со слоями и облачными проектами")]
-[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyVersion("0.2.0.0")]
 internal static class Bootstrap {
     [STAThread]
     private static int Main(string[] args) {

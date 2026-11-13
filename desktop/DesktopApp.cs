@@ -16,26 +16,27 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
 internal static class DesktopApp {
+    internal const string Version = "0.2.0";
     internal const string SiteUrl = "https://pixel-studio-nov12-26.recentlens.chatgpt.site";
     internal const string LocalOrigin = "https://pixel-studio.local";
     internal static readonly string DataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PixelStudio");
     [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
     // This per-user credential is provisioned separately; it is never an EXE
     // resource, browser cookie, JavaScript value, or part of the source archive.
-    internal static void AddServiceAccess(HttpRequestMessage request, Uri backend) {
+    internal static bool AddServiceAccess(HttpRequestMessage request, Uri backend) {
         Uri configured = new Uri(SiteUrl);
         string expected = configured.GetLeftPart(UriPartial.Authority);
-        if (backend.Scheme != "https" || backend.GetLeftPart(UriPartial.Authority) != expected || request.RequestUri == null || request.RequestUri.Scheme != "https" || request.RequestUri.GetLeftPart(UriPartial.Authority) != expected) return;
+        if (backend.Scheme != "https" || backend.GetLeftPart(UriPartial.Authority) != expected || request.RequestUri == null || request.RequestUri.Scheme != "https" || request.RequestUri.GetLeftPart(UriPartial.Authority) != expected) return false;
         string path = Path.Combine(DataDirectory, "service-access.bin");
         try {
-            if (!File.Exists(path) || new FileInfo(path).Length > 131072) return;
+            if (!File.Exists(path) || new FileInfo(path).Length > 131072) return false;
             byte[] plaintext = ProtectedData.Unprotect(File.ReadAllBytes(path), null, DataProtectionScope.CurrentUser);
             try {
                 string token = Encoding.UTF8.GetString(plaintext).Trim();
-                if (token.Length < 1 || token.Length > 16384 || token.IndexOfAny(new char[] { '\r', '\n' }) >= 0) return;
-                request.Headers.TryAddWithoutValidation("OAI-Sites-Authorization", "Bearer " + token);
+                if (token.Length < 1 || token.Length > 16384 || token.IndexOfAny(new char[] { '\r', '\n' }) >= 0) return false;
+                return request.Headers.TryAddWithoutValidation("OAI-Sites-Authorization", "Bearer " + token);
             } finally { Array.Clear(plaintext, 0, plaintext.Length); }
-        } catch { /* Missing or unreadable provisioning leaves cloud features unavailable. */ }
+        } catch { return false; }
     }
     internal static int Run(string[] args) {
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
@@ -161,10 +162,10 @@ internal sealed class StudioWindow : Form {
         if (!(backend.Scheme == "https" || (local && backend.Scheme == "http" && backend.IsLoopback))) throw new InvalidOperationException("Некорректный адрес API.");
         var handler = new HttpClientHandler { CookieContainer = cookies, AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate };
         client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(25) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("PixelStudio/1.0");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("PixelStudio/" + DesktopApp.Version);
         Cookie session = NativeSession.Load(backend, local);
         if (session != null) cookies.Add(backend, session);
-        Text = local ? "Pixel Studio — локальный API" : "Pixel Studio";
+        Text = "Pixel Studio " + DesktopApp.Version + (local ? " — локальный API" : "");
         Width = 1440; Height = 960; MinimumSize = new Size(900, 640);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.FromArgb(22, 24, 27);
@@ -212,11 +213,11 @@ internal sealed class StudioWindow : Form {
             if (!IsDisposed) MessageBox.Show(this, ex is HttpRequestException || ex is TaskCanceledException ? "Не удалось подключиться к входу Google. Проверьте интернет. Редактор продолжает работать без входа." : ex.Message, "Вход через Google", MessageBoxButtons.OK, MessageBoxIcon.Information);
         } finally { signingIn = false; }
     }
-    private static async Task<byte[]> ReadLimited(Stream stream, int maximum) {
+    private static async Task<byte[]> ReadLimited(Stream stream, int maximum, CancellationToken cancellation = default(CancellationToken)) {
         using (var buffer = new MemoryStream()) {
             byte[] chunk = new byte[81920];
             int count;
-            while ((count = await stream.ReadAsync(chunk, 0, chunk.Length)) > 0) {
+            while ((count = await stream.ReadAsync(chunk, 0, chunk.Length, cancellation)) > 0) {
                 if (buffer.Length + count > maximum) throw new InvalidDataException("Размер данных превышает допустимый.");
                 buffer.Write(chunk, 0, count);
             }
@@ -254,6 +255,7 @@ internal sealed class StudioWindow : Form {
     }
     private async void ProxyApi(object sender, CoreWebView2WebResourceRequestedEventArgs ev) {
         var deferral = ev.GetDeferral();
+        string route = "/api/other", method = ev.Request.Method.ToUpperInvariant();
         try {
             Uri source;
             if (!Uri.TryCreate(ev.Request.Uri, UriKind.Absolute, out source) || !IsLocalUI(source) || !source.AbsolutePath.StartsWith("/api/", StringComparison.Ordinal)) {
@@ -263,27 +265,41 @@ internal sealed class StudioWindow : Form {
             if (target.GetLeftPart(UriPartial.Authority) != backend.GetLeftPart(UriPartial.Authority) || !target.AbsolutePath.StartsWith("/api/", StringComparison.Ordinal)) {
                 JsonResponse(ev, 403, "Forbidden", "{\"error\":\"Недопустимый адрес API.\"}"); return;
             }
-            string method = ev.Request.Method.ToUpperInvariant();
+            route = source.AbsolutePath;
             if (method != "GET" && method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" && method != "HEAD") {
                 JsonResponse(ev, 405, "Method Not Allowed", "{\"error\":\"Этот метод не поддерживается.\"}"); return;
             }
+            using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25)))
             using (var request = new HttpRequestMessage(new HttpMethod(method), target)) {
-                DesktopApp.AddServiceAccess(request, backend);
+                if (!DesktopApp.AddServiceAccess(request, backend) && !local) {
+                    var missing = new CloudFailure(403, "CLOUD_ACCESS_MISSING", "На этом ПК отсутствует или не читается настройка доступа к закрытому облаку. Нужно восстановить служебный доступ; повторный вход Google это не исправит.");
+                    CloudDiagnostics.Record(DesktopApp.DataDirectory, method, route, missing.Status, missing.Code);
+                    JsonResponse(ev, missing.Status, "Forbidden", missing.Json()); return;
+                }
+                // Do not retain a connection from the previous network/VPN route.
+                request.Headers.ConnectionClose = true;
                 request.Headers.TryAddWithoutValidation("Origin", backend.GetLeftPart(UriPartial.Authority));
                 request.Headers.TryAddWithoutValidation("Accept", "application/json");
                 if (ev.Request.Content != null && method != "GET" && method != "HEAD") {
-                    byte[] body = await ReadLimited(ev.Request.Content, 16 * 1024 * 1024);
+                    byte[] body = await ReadLimited(ev.Request.Content, 16 * 1024 * 1024, deadline.Token);
                     request.Content = new ByteArrayContent(body);
                     string type = ev.Request.Headers.Contains("Content-Type") ? ev.Request.Headers.GetHeader("Content-Type") : "application/json";
                     request.Content.Headers.TryAddWithoutValidation("Content-Type", type);
                 }
-                using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead)) {
-                    string type = response.Content.Headers.ContentType == null ? "application/json; charset=utf-8" : response.Content.Headers.ContentType.ToString();
+                using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token)) {
+                    string type = response.Content.Headers.ContentType == null ? "" : response.Content.Headers.ContentType.ToString();
                     if (((int)response.StatusCode >= 300 && (int)response.StatusCode < 400) || !type.StartsWith("application/json", StringComparison.OrdinalIgnoreCase)) {
-                        JsonResponse(ev, 503, "Service Unavailable", "{\"error\":\"Облачный сервис пока недоступен. Можно продолжить работу и сохранить проект на компьютере.\"}"); return;
+                        var failure = CloudFailure.UnexpectedResponse((int)response.StatusCode);
+                        CloudDiagnostics.Record(DesktopApp.DataDirectory, method, route, (int)response.StatusCode, failure.Code);
+                        JsonResponse(ev, failure.Status, "Cloud Response Error", failure.Json()); return;
                     }
                     byte[] body;
-                    using (Stream content = await response.Content.ReadAsStreamAsync()) body = await ReadLimited(content, 32 * 1024 * 1024);
+                    using (Stream content = await response.Content.ReadAsStreamAsync())
+                    using (deadline.Token.Register(delegate { content.Dispose(); })) {
+                        try { body = await ReadLimited(content, 32 * 1024 * 1024, deadline.Token); }
+                        catch { deadline.Token.ThrowIfCancellationRequested(); throw; }
+                    }
+                    CloudDiagnostics.Record(DesktopApp.DataDirectory, method, route, (int)response.StatusCode, response.IsSuccessStatusCode ? "OK" : "HTTP_ERROR");
                     if (response.IsSuccessStatusCode && method == "POST" && source.AbsolutePath == "/api/auth/logout") {
                         NativeSession.Clear(local);
                         cookies.Add(backend, new Cookie("pixel_session", "", "/", backend.Host) { Expires = DateTime.UtcNow.AddDays(-1) });
@@ -293,8 +309,10 @@ internal sealed class StudioWindow : Form {
             }
         } catch (InvalidDataException) {
             if (!IsDisposed) JsonResponse(ev, 413, "Payload Too Large", "{\"error\":\"Проект слишком большой для облачного сервиса. Сохраните его на компьютере.\"}");
-        } catch {
-            if (!IsDisposed) JsonResponse(ev, 503, "Service Unavailable", "{\"error\":\"Нет связи с облаком. Редактор работает автономно; сохраните проект на компьютере.\"}");
+        } catch (Exception error) {
+            var failure = CloudFailure.FromException(error);
+            CloudDiagnostics.Record(DesktopApp.DataDirectory, method, route, failure.Status, failure.Code);
+            if (!IsDisposed) JsonResponse(ev, failure.Status, "Cloud Connection Error", failure.Json());
         } finally { try { deferral.Complete(); } catch { } }
     }
     private async void Initialize() {

@@ -77,7 +77,7 @@ try {
   assert.equal(loaded.data.updatedAt, created.data.updatedAt);
   assert.equal(loaded.response.headers.get("cache-control"), "no-store");
 
-  const revised = { ...document, layers: [{ ...document.layers[0], opacity: 0.5 }] };
+  const revised = { ...document, version: 2, layers: [{ ...document.layers[0], opacity: 0.5, animation: {width: 1, height: 1, matrix: [1,0,0,1,0,0], frames: [{image, delay: 100}, {image, delay: 200}]} }] };
   const updated = await call(`/api/projects/${id}`, { method: "PUT", body: { name: "Обновлённый тест", document: revised } });
   status(updated, 200, "Update cloud project");
   assert.ok(updated.data.updatedAt >= created.data.updatedAt);

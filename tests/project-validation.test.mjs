@@ -19,6 +19,17 @@ test("valid documents are normalized and unrecognized fields are stripped", () =
   assert.equal(result.document.layers[0].html, undefined);
 });
 
+test('animated projects retain frames and reject corrupt or oversized animation metadata', () => {
+  const input = payload(); input.document.version = 2;
+  input.document.layers[0].animation = {width: 1, height: 1, matrix: [1,0,0,1,0,0], frames: [{image: PNG, delay: 100},{image: PNG, delay: 200}]};
+  assert.equal(validateProjectPayload(input).document.layers[0].animation.frames.length, 2);
+  for (const change of [a => a.matrix[0] = Infinity, a => a.frames[0].delay = 0, a => a.frames[0].image = 'data:image/svg+xml;base64,PHN2Zz4=', a => a.width = 4096, a => a.frames = Array(121).fill(a.frames[0])]) {
+    const damaged = structuredClone(input); change(damaged.document.layers[0].animation);
+    assert.throws(() => validateProjectPayload(damaged), AppError);
+  }
+  input.document.version = 1; assert.throws(() => validateProjectPayload(input), AppError);
+});
+
 test("dimension and cumulative decoded image limits reject oversized projects", () => {
   invalid((p) => { p.document.width = 4097; });
   invalid((p) => { p.document.height = 0; });

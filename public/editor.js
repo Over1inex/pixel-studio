@@ -1,3 +1,4 @@
+import {decodeGif, drawAnimation, animationDuration, animationPixels, encodeGif, MAX_ANIMATION_PIXELS} from './animation.js';
 const MAX_DIMENSION = 4096;
 const MAX_PIXELS = 8_388_608;
 const MAX_LAYERS = 16;
@@ -78,6 +79,9 @@ export class Editor {
     this.selection = null;
     this.busy = false;
     this.drag = null;
+    this.playheadMs = 0;
+    this.playing = false;
+    this.onNotice = message => { void message; };
     this.canvas.style.touchAction = 'none';
     this.handlers = {
       pointerdown: event => this._pointerDown(event),
@@ -92,6 +96,45 @@ export class Editor {
   get active() { return this.layers.find(layer => layer.id === this.activeId) || null; }
   get canUndo() { return this.historyIndex > 0; }
   get canRedo() { return this.historyIndex < this.history.length - 1; }
+  get hasAnimation() { return this.layers.some(layer => layer.animation); }
+  get durationMs() { return Math.max(0, ...this.layers.filter(layer => layer.animation).map(layer => animationDuration(layer.animation))); }
+  pause() { this.playing = false; if (this.animationFrame) cancelAnimationFrame(this.animationFrame); this.animationFrame = null; }
+  seek(time) { this.pause(); this.playheadMs = Math.max(0, Math.min(this.durationMs, Number(time) || 0)); this.render(); }
+  play() {
+    this.pause(); if (!this.hasAnimation) return;
+    this.playing = true;
+    const start = performance.now() - this.playheadMs;
+    const tick = () => {
+      if (!this.playing) return;
+      this.playheadMs = (performance.now() - start) % (this.durationMs || 1);
+      if (!this.busy) this.render();
+      this.animationFrame = requestAnimationFrame(tick);
+    };
+    this.animationFrame = requestAnimationFrame(tick);
+  }
+  _refreshAnimationPreview(layer) {
+    if (!layer.animation) return;
+    const ctx = layer.canvas.getContext('2d'); ctx.clearRect(0, 0, this.width, this.height);
+    drawAnimation(ctx, layer.animation, 0);
+  }
+  async importGif(file) {
+    this._assertReady();
+    if (this.layers.length >= MAX_LAYERS) throw new Error('В одном проекте может быть до 16 слоёв.');
+    this._checkLayerBudget(this.layers.length + 1);
+    const existingPixels = (this.layers.length + 1) * this.width * this.height + this.layers.reduce((sum, layer) => sum + (layer.animation ? animationPixels(layer.animation) : 0), 0);
+    this.busy = true;
+    try {
+      const animation = await decodeGif(file, MAX_ANIMATION_PIXELS - existingPixels);
+      const frame = animation.frames[0].canvas;
+      const scale = Math.min(1, this.width / frame.width, this.height / frame.height);
+      animation.matrix = [scale, 0, 0, scale, (this.width - frame.width * scale) / 2, (this.height - frame.height * scale) / 2];
+      const layer = this._layer((file.name || 'Анимация').replace(/\.gif$/i, ''));
+      layer.animation = animation; this._refreshAnimationPreview(layer);
+      this.layers.push(layer); this.activeId = layer.id;
+      this._commit('Добавлена GIF-анимация'); this.play();
+    } finally { this.busy = false; this._notify(); }
+  }
+  async exportGif(progress) { this._assertReady(); this.busy = true; try { return await encodeGif(this, progress); } finally { this.busy = false; } }
 
   _layer(name = 'Новый слой') {
     return { id: uid(), name: String(name).slice(0, 100), visible: true, opacity: 1, canvas: surface(this.width, this.height) };
@@ -103,7 +146,8 @@ export class Editor {
   }
 
   _checkLayerBudget(count = this.layers.length, width = this.width, height = this.height) {
-    if (count * width * height > MAX_PROJECT_PIXELS) throw new Error('Для этого размера слишком много слоёв. Уменьшите изображение или удалите ненужные слои (лимит: 16 млн пикселей во всех слоях).');
+    const animationSize = this.layers.reduce((sum, layer) => sum + (layer.animation ? animationPixels(layer.animation) : 0), 0);
+    if (count * width * height + animationSize > MAX_PROJECT_PIXELS) throw new Error('Для этого размера слишком много слоёв или кадров GIF. Уменьшите изображение или удалите ненужные слои (лимит: 16 млн пикселей).');
   }
 
   _notify() { this.onChange(this); }
@@ -112,11 +156,12 @@ export class Editor {
     return {
       label, width: this.width, height: this.height, activeId: this.activeId,
       layers: this.layers.map(layer => ({ ...layer, canvas: copyCanvas(layer.canvas) })),
-      bytes: this.width * this.height * this.layers.length * 4,
+      bytes: (this.width * this.height * this.layers.length + this.layers.reduce((sum, layer) => sum + (layer.animation ? animationPixels(layer.animation) : 0), 0)) * 4,
     };
   }
 
   _commit(label) {
+    if (!this.hasAnimation) { this.pause(); this.playheadMs = 0; }
     this.history = this.history.slice(0, this.historyIndex + 1);
     this.history.push(this._snapshot(label));
     this.historyBytes = this.history.reduce((total, item) => total + item.bytes, 0);
@@ -136,6 +181,7 @@ export class Editor {
 
   newDocument(width, height, background = 'transparent') {
     this._assertReady();
+    this.pause(); this.playheadMs = 0;
     [this.width, this.height] = validateDimensions(width, height);
     const layer = this._layer(background === 'transparent' ? 'Слой 1' : 'Фон');
     if (background !== 'transparent') {
@@ -221,6 +267,10 @@ export class Editor {
     if (!this.active) return;
     if (this.layers.length >= MAX_LAYERS) throw new Error('В одном проекте может быть до 16 слоёв.');
     this._checkLayerBudget(this.layers.length + 1);
+    if (this.active.animation) {
+      const pixels = (this.layers.length + 1) * this.width * this.height + this.layers.reduce((sum, layer) => sum + (layer.animation ? animationPixels(layer.animation) : 0), animationPixels(this.active.animation));
+      if (pixels > MAX_PROJECT_PIXELS) throw new Error('Недостаточно памяти для дублирования GIF-слоя.');
+    }
     const layer = { ...this.active, id: uid(), name: `${this.active.name} — копия`.slice(0, 100), canvas: copyCanvas(this.active.canvas) };
     const index = this.layers.findIndex(item => item.id === this.activeId);
     this.layers.splice(index + 1, 0, layer);
@@ -271,6 +321,7 @@ export class Editor {
     this.layers = snapshot.layers.map(layer => ({ ...layer, canvas: copyCanvas(layer.canvas) }));
     this.activeId = snapshot.activeId;
     this.selection = null;
+    if (!this.hasAnimation) { this.pause(); this.playheadMs = 0; }
     this.render(); this._notify();
   }
 
@@ -295,6 +346,7 @@ export class Editor {
 
   async importImage(file) {
     this._assertReady();
+    if (file.type === 'image/gif' || /\.gif$/i.test(file.name || '')) return this.importGif(file);
     if (this.layers.length >= MAX_LAYERS) throw new Error('В одном проекте может быть до 16 слоёв.');
     this._checkLayerBudget(this.layers.length + 1);
     if (!(file instanceof Blob) || file.size > 25 * 1024 * 1024) throw new Error('Выберите изображение размером до 25 МБ.');
@@ -318,23 +370,37 @@ export class Editor {
   serialize() {
     this._assertReady();
     return {
-      version: 1, width: this.width, height: this.height, activeId: this.activeId,
-      layers: this.layers.map(({ id, name, visible, opacity, canvas }) => ({ id, name, visible, opacity, image: canvas.toDataURL('image/png') })),
+      version: this.hasAnimation ? 2 : 1, width: this.width, height: this.height, activeId: this.activeId,
+      layers: this.layers.map(({ id, name, visible, opacity, canvas, animation }) => ({ id, name, visible, opacity, image: canvas.toDataURL('image/png'), ...(animation ? {animation: {matrix: animation.matrix, width: animation.frames[0].canvas.width, height: animation.frames[0].canvas.height, frames: animation.frames.map(frame => ({image: frame.canvas.toDataURL('image/png'), delay: frame.delay}))}} : {}) })),
     };
   }
 
   async loadProject(project) {
     this._assertReady();
-    if (!project || project.version !== 1 || !Array.isArray(project.layers) || project.layers.length < 1 || project.layers.length > MAX_LAYERS) throw new Error('Неверный формат проекта Pixel Studio.');
+    if (!project || ![1, 2].includes(project.version) || !Array.isArray(project.layers) || project.layers.length < 1 || project.layers.length > MAX_LAYERS) throw new Error('Неверный формат проекта Pixel Studio.');
     const [width, height] = validateDimensions(project.width, project.height);
-    this._checkLayerBudget(project.layers.length, width, height);
+    if (project.layers.length * width * height > MAX_PROJECT_PIXELS) throw new Error('Слишком много крупных слоёв.');
     const ids = new Set();
-    let sourceBytes = 0;
+    let sourceBytes = 0, projectPixels = project.layers.length * width * height;
     for (const layer of project.layers) {
       if (!layer || typeof layer.image !== 'string') throw new Error('В проекте обнаружено неверное изображение слоя.');
       sourceBytes += layer.image.length;
       if (sourceBytes > 64 * 1024 * 1024) throw new Error('Файл проекта превышает 64 МБ.');
       validatePngDimensions(layer.image, width, height);
+      if (layer.animation) {
+        const a = layer.animation;
+        validateDimensions(a.width, a.height);
+        if (!Array.isArray(a.matrix) || a.matrix.length !== 6 || a.matrix.some(value => !Number.isFinite(value) || Math.abs(value) > 65536) || !Array.isArray(a.frames) || !a.frames.length || a.frames.length > 120) throw new Error('Повреждён GIF-слой.');
+        projectPixels += a.width * a.height * a.frames.length;
+        if (projectPixels > MAX_PROJECT_PIXELS) throw new Error('Слишком много пикселей в GIF-слоях.');
+        let duration = 0;
+        for (const frame of a.frames) {
+          if (!Number.isInteger(frame.delay) || frame.delay < 10 || frame.delay > 60000) throw new Error('Неверная задержка кадра GIF.');
+          duration += frame.delay; sourceBytes += frame.image?.length || 0;
+          if (sourceBytes > 64 * 1024 * 1024 || duration > 60000) throw new Error('GIF-проект превышает допустимый размер или длительность.');
+          validatePngDimensions(frame.image, a.width, a.height);
+        }
+      }
     }
     this.busy = true;
     try {
@@ -346,8 +412,18 @@ export class Editor {
         ids.add(id);
         const canvas = surface(width, height);
         canvas.getContext('2d').drawImage(image, 0, 0);
-        layers.push({ id, name: String(source.name || 'Слой').slice(0, 100), visible: source.visible !== false, opacity: source.opacity == null ? 1 : clamp(source.opacity, 0, 1), canvas });
+        const layer = { id, name: String(source.name || 'Слой').slice(0, 100), visible: source.visible !== false, opacity: source.opacity == null ? 1 : clamp(source.opacity, 0, 1), canvas };
+        if (source.animation) {
+          const frames = [];
+          for (const frame of source.animation.frames) {
+            const image = await loadImage(frame.image), output = surface(source.animation.width, source.animation.height);
+            output.getContext('2d').drawImage(image, 0, 0); frames.push({canvas: output, delay: frame.delay});
+          }
+          layer.animation = {frames, matrix: [...source.animation.matrix]};
+        }
+        layers.push(layer);
       }
+      this.pause(); this.playheadMs = 0;
       this.width = width; this.height = height;
       this.layers = layers;
       this.activeId = ids.has(project.activeId) ? project.activeId : layers[layers.length - 1].id;
@@ -356,13 +432,17 @@ export class Editor {
     } finally { this.busy = false; this._notify(); }
   }
 
-  _composite(target, includePreview = false) {
+  _composite(target, includePreview = false, time = this.playheadMs) {
     const ctx = target.getContext('2d');
     ctx.clearRect(0, 0, this.width, this.height);
     ctx.save();
     for (const layer of this.layers) {
       if (!layer.visible) continue;
       ctx.globalAlpha = layer.opacity;
+      if (layer.animation) {
+        drawAnimation(ctx, includePreview && this.drag?.layerId === layer.id && this.drag.previewAnimation ? this.drag.previewAnimation : layer.animation, time);
+        continue;
+      }
       const source = includePreview && this.drag?.layerId === layer.id && this.drag.preview ? this.drag.preview : layer.canvas;
       ctx.drawImage(source, 0, 0);
     }
@@ -414,6 +494,11 @@ export class Editor {
       this._notify(); return;
     }
     if (this.tool !== 'crop' && !this.active.visible) return;
+    if (this.active.animation && !['move', 'crop', 'eyedropper'].includes(this.tool)) {
+      if (this.tool === 'eraser') { this.onNotice('Для ластика выберите обычный слой. GIF сохраняет все кадры.'); return; }
+      this.addLayer(this.tool === 'text' ? 'Текст над GIF' : 'Рисунок над GIF');
+      this.onNotice('Создан обычный слой поверх GIF — анимация сохранена.');
+    }
     if (this.tool === 'text') {
       const value = String(this.textValue || '').slice(0, 5000);
       if (!value.trim()) return;
@@ -426,7 +511,7 @@ export class Editor {
     }
     if (this.tool === 'fill') { if (this._floodFill(point)) this._commit('Заливка'); return; }
     const source = this.tool === 'crop' ? null : copyCanvas(this.active.canvas);
-    this.drag = { pointerId: event.pointerId, tool: this.tool, layerId: this.activeId, start: point, last: point, source, preview: null, moved: false, previousSelection: this.selection };
+    this.drag = { pointerId: event.pointerId, tool: this.tool, layerId: this.activeId, start: point, last: point, source, sourceAnimation: this.active.animation, preview: null, moved: false, previousSelection: this.selection };
     try { this.canvas.setPointerCapture(event.pointerId); } catch { /* Synthetic events may not have an active pointer. */ }
     if (this.tool === 'brush' || this.tool === 'eraser') this._paint(point, point);
     if (this.tool === 'crop') this.selection = { x: Math.floor(point.x), y: Math.floor(point.y), width: 0, height: 0 };
@@ -451,6 +536,10 @@ export class Editor {
     event.preventDefault();
     const point = this._position(event);
     drag.moved ||= Math.abs(point.x - drag.start.x) + Math.abs(point.y - drag.start.y) > 1;
+    if (drag.tool === 'move' && drag.sourceAnimation) {
+      const matrix = [...drag.sourceAnimation.matrix]; matrix[4] += Math.round(point.x - drag.start.x); matrix[5] += Math.round(point.y - drag.start.y);
+      drag.previewAnimation = {...drag.sourceAnimation, matrix}; drag.last = point; this.render(); return;
+    }
     if (drag.tool === 'brush' || drag.tool === 'eraser') {
       const events = event.getCoalescedEvents?.() || [];
       for (const item of events.length ? events : [event]) {
@@ -489,6 +578,10 @@ export class Editor {
     if (!drag || drag.pointerId !== event.pointerId) return;
     // Include the final pointer position even when the browser coalesces the last move.
     this._pointerMove(event);
+    if (drag.previewAnimation) {
+      const layer = this.layers.find(item => item.id === drag.layerId);
+      layer.animation = drag.previewAnimation; this._refreshAnimationPreview(layer);
+    }
     if (drag.preview) {
       const layer = this.layers.find(item => item.id === drag.layerId);
       const ctx = layer.canvas.getContext('2d'); ctx.clearRect(0, 0, this.width, this.height); ctx.drawImage(drag.preview, 0, 0);
@@ -549,6 +642,14 @@ export class Editor {
     if (!this.active) return;
     const filters = { grayscale: 'grayscale(1)', sepia: 'sepia(1)', invert: 'invert(1)', brightness: 'brightness(1.15)', darken: 'brightness(.85)', contrast: 'contrast(1.2)', saturate: 'saturate(1.35)', blur: 'blur(3px)' };
     if (!filters[name]) throw new Error('Этот фильтр не поддерживается.');
+    if (this.active.animation) {
+      const frames = this.active.animation.frames.map(frame => {
+        const output = surface(frame.canvas.width, frame.canvas.height), ctx = output.getContext('2d');
+        ctx.filter = filters[name]; ctx.drawImage(frame.canvas, 0, 0); return {...frame, canvas: output};
+      });
+      this.active.animation = {...this.active.animation, frames}; this._refreshAnimationPreview(this.active);
+      this._commit('Фильтр GIF: ' + name); return;
+    }
     const source = copyCanvas(this.active.canvas), ctx = this.active.canvas.getContext('2d');
     ctx.clearRect(0, 0, this.width, this.height); ctx.save(); ctx.filter = filters[name]; ctx.drawImage(source, 0, 0); ctx.restore();
     this._commit('Фильтр: ' + ({ grayscale: 'чёрно-белый', sepia: 'сепия', invert: 'инверсия', brightness: 'светлее', darken: 'темнее', contrast: 'контраст', saturate: 'насыщенность', blur: 'размытие' }[name]));
@@ -560,6 +661,7 @@ export class Editor {
     for (const layer of this.layers) {
       const output = surface(oldHeight, oldWidth), ctx = output.getContext('2d');
       ctx.translate(oldHeight, 0); ctx.rotate(Math.PI / 2); ctx.drawImage(layer.canvas, 0, 0); layer.canvas = output;
+      if (layer.animation) { const [a,b,c,d,e,f] = layer.animation.matrix; layer.animation = {...layer.animation, matrix: [-b,a,-d,c,oldHeight-f,e]}; }
     }
     this.width = oldHeight; this.height = oldWidth; this.selection = null;
     this._commit('Поворот на 90°');
@@ -568,20 +670,49 @@ export class Editor {
   flipHorizontal() {
     this._assertReady();
     if (!this.active) return;
+    if (this.active.animation) {
+      const [a,b,c,d,e,f] = this.active.animation.matrix;
+      this.active.animation = {...this.active.animation, matrix: [-a,b,-c,d,this.width-e,f]};
+      this._refreshAnimationPreview(this.active); this._commit('Отражение GIF-слоя'); return;
+    }
     const source = copyCanvas(this.active.canvas), ctx = this.active.canvas.getContext('2d');
     ctx.clearRect(0, 0, this.width, this.height); ctx.save(); ctx.translate(this.width, 0); ctx.scale(-1, 1); ctx.drawImage(source, 0, 0); ctx.restore();
     this._commit('Отражение слоя');
   }
 
-  resizeCanvas(width, height) {
+  resizeCanvas(width, height, method = 'smooth') {
     this._assertReady();
     [width, height] = validateDimensions(width, height);
     this._checkLayerBudget(this.layers.length, width, height);
-    for (const layer of this.layers) {
+    if (!['smooth', 'nearest'].includes(method)) throw new Error('Неизвестный способ масштабирования.');
+    if (width === this.width && height === this.height) return;
+    // Prepare every layer before changing the document, so a failed allocation
+    // cannot leave layers at different dimensions. Halve large reductions in
+    // stages to retain thin details instead of sampling them away in one pass.
+    const resized = this.layers.map(layer => {
+      let source = layer.canvas;
+      if (method === 'smooth') {
+        while (source.width >= width * 2 || source.height >= height * 2) {
+          const next = surface(Math.max(width, Math.floor(source.width / 2)), Math.max(height, Math.floor(source.height / 2)));
+          const ctx = next.getContext('2d');
+          ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(source, 0, 0, next.width, next.height);
+          if (source !== layer.canvas) { source.width = 1; source.height = 1; }
+          source = next;
+        }
+      }
       const output = surface(width, height), ctx = output.getContext('2d');
-      ctx.imageSmoothingQuality = 'high'; ctx.drawImage(layer.canvas, 0, 0, width, height); layer.canvas = output;
-    }
+      ctx.imageSmoothingEnabled = method !== 'nearest'; ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(source, 0, 0, width, height);
+      if (source !== layer.canvas) { source.width = 1; source.height = 1; }
+      return output;
+    });
+    this.layers.forEach((layer, index) => {
+      layer.canvas = resized[index];
+      if (layer.animation) { const [a,b,c,d,e,f] = layer.animation.matrix, sx = width / this.width, sy = height / this.height; layer.animation = {...layer.animation, matrix: [a*sx,b*sy,c*sx,d*sy,e*sx,f*sy]}; }
+    });
     this.width = width; this.height = height; this.selection = null;
+    this.layers.forEach(layer => this._refreshAnimationPreview(layer));
     this._commit('Изменён размер изображения');
   }
 
@@ -592,12 +723,14 @@ export class Editor {
     for (const layer of this.layers) {
       const output = surface(width, height);
       output.getContext('2d').drawImage(layer.canvas, x, y, width, height, 0, 0, width, height); layer.canvas = output;
+      if (layer.animation) { const matrix = [...layer.animation.matrix]; matrix[4] -= x; matrix[5] -= y; layer.animation = {...layer.animation, matrix}; }
     }
     this.width = width; this.height = height; this.selection = null;
     this._commit('Кадрирование');
   }
 
   destroy() {
+    this.pause();
     this._cancelDrag();
     Object.entries(this.handlers).forEach(([name, handler]) => this.canvas.removeEventListener(name, handler));
     this.history = []; this.layers = [];
