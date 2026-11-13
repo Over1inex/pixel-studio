@@ -1,0 +1,11 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {generateKeyPair,SignJWT} from 'jose';
+import {verifyGoogleToken,validateCodeRequest,hashSession,randomSession} from '../lib/google-auth.mjs';
+const {privateKey,publicKey}=await generateKeyPair('RS256');
+const client='test.apps.googleusercontent.com',nonce='n'.repeat(43);
+async function token(changes={}){return new SignJWT({email:'tester@example.com',email_verified:true,name:'Test',nonce,sub:'123',...changes}).setProtectedHeader({alg:'RS256'}).setIssuer('https://accounts.google.com').setAudience(client).setIssuedAt().setExpirationTime('10m').sign(privateKey);}
+test('Google identity is based on signed subject and checks audience/nonce',async()=>{const t=await token();const u=await verifyGoogleToken(t,client,nonce,publicKey);assert.equal(u.userId,'google:123');await assert.rejects(verifyGoogleToken(t,'other-client',nonce,publicKey));await assert.rejects(verifyGoogleToken(t,client,'x'.repeat(43),publicKey));});
+test('unverified email, forged tokens and unauthorized signing keys are denied',async()=>{await assert.rejects(verifyGoogleToken(await token({email_verified:false}),client,nonce,publicKey));const t=await token();const parts=t.split('.');parts[1]=Buffer.from(JSON.stringify({sub:'attacker',email_verified:true})).toString('base64url');await assert.rejects(verifyGoogleToken(parts.join('.'),client,nonce,publicKey));const other=await generateKeyPair('RS256');await assert.rejects(verifyGoogleToken(t,client,nonce,other.publicKey));});
+test('desktop callback accepts only random loopback ports with PKCE',()=>{const data={code:'abc12345',codeVerifier:'v'.repeat(43),nonce,redirectUri:'http://127.0.0.1:45678/'};assert.deepEqual(validateCodeRequest(data),data);for(const redirectUri of ['https://evil.example/','http://localhost:5000/','http://127.0.0.1:80/','http://127.0.0.1:5000/other','http://user@127.0.0.1:5000/'])assert.throws(()=>validateCodeRequest({...data,redirectUri}));assert.throws(()=>validateCodeRequest({...data,codeVerifier:'short'}));});
+test('session tokens are unique and only a one-way hash is stored',async()=>{const a=randomSession(),b=randomSession();assert.match(a,/^[a-f0-9]{64}$/);assert.notEqual(a,b);const hash=await hashSession(a);assert.match(hash,/^[a-f0-9]{64}$/);assert.notEqual(hash,a);assert.equal(hash,await hashSession(a));});
