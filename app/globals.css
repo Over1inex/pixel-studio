@@ -472,6 +472,22 @@ button, label, a { touch-action: manipulation; }
 .connection-status summary { cursor:pointer; color:var(--muted); }
 .connection-status code { display:block; margin-top:8px; font-size:11px; overflow-wrap:anywhere; }
 .connection-status .subtle-button { display:flex; align-items:center; justify-content:center; gap:7px; margin-top:10px; }
+.layer-transform-box { position:absolute; z-index:8; box-sizing:border-box; border:1px solid #3984ff; box-shadow:0 0 0 1px #fff8; cursor:move; touch-action:none; }
+.transform-handle { position:absolute; width:12px; height:12px; background:#fff; border:2px solid #286bdf; box-sizing:border-box; z-index:2; touch-action:none; }
+.transform-handle.nw { left:-6px; top:-6px; cursor:nwse-resize; }
+.transform-handle.ne { right:-6px; top:-6px; cursor:nesw-resize; }
+.transform-handle.sw { left:-6px; bottom:-6px; cursor:nesw-resize; }
+.transform-handle.se { right:-6px; bottom:-6px; cursor:nwse-resize; }
+.transform-layer-label { position:absolute; top:-27px; left:0; font-size:11px; color:#fff; background:#286bdf; padding:4px 7px; border-radius:3px; white-space:nowrap; max-width:250px; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
+.transform-options { overflow-x:auto; gap:12px; }
+.transform-options strong { font-size:12px; white-space:nowrap; }
+.transform-options .transform-ratio { display:flex; align-items:center; gap:5px; white-space:nowrap; }
+.transform-ratio input[type="checkbox"] { width:14px; height:14px; accent-color:var(--focus); }
+.transform-confirm { display:flex; gap:8px; margin-left:auto; white-space:nowrap; }
+.transform-confirm button,.compact-action { display:flex; align-items:center; gap:5px; padding:6px 9px; font-size:11px; }
+.fill-contiguous { display:flex; align-items:center; gap:5px; white-space:nowrap; }
+.fill-contiguous input[type="checkbox"] { width:14px; height:14px; accent-color:var(--focus); }
+.update-badge { font-size:11px; color:var(--text); border:1px solid var(--focus); border-radius:5px; padding:6px 9px; background:var(--selected); }
 .inline-error { color:#e06e65 !important; margin-top:14px; }
 .format-options { grid-template-columns:repeat(3,minmax(0,1fr)); }
 .format-options span { font-size:10px; }

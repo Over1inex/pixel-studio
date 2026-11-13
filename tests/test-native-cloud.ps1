@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 $taskRoot=Split-Path -Parent $PSScriptRoot
 $taskWork=Join-Path $taskRoot ('work/native-cloud-test-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $taskWork | Out-Null

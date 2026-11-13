@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 $taskProject=Split-Path -Parent $PSScriptRoot
 $taskWork=Join-Path $taskProject ('work/uninstall-test-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $taskWork | Out-Null
@@ -31,3 +31,21 @@ foreach($taskInvalid in @($true,$false)){
  if(-not(Test-Path -LiteralPath $taskKeep) -or -not(Test-Path -LiteralPath $taskOutside)){throw 'Cleanup removed user files'}
 }
 Write-Output 'Uninstaller: unsafe path rejected; own files removed; user project and outside file preserved.'
+# Regression: an archive manager retains the empty extraction directory.
+$taskArchiveRoot=Join-Path $taskWork 'Pixel Studio'
+New-Item -ItemType Directory -Path $taskArchiveRoot|Out-Null
+$taskArchiveApp=Join-Path $taskArchiveRoot 'Pixel Studio.exe'
+& $taskCompiler /nologo /target:exe "/out:$taskArchiveApp" $taskDummyApp
+if($LASTEXITCODE -ne 0){throw 'Archive fixture build failed'}
+$taskArchiveSelf=Join-Path $taskArchiveRoot 'Uninstall Pixel Studio.exe'
+[IO.File]::WriteAllText($taskArchiveSelf,'disposable self fixture')
+$taskPlan=@{root=$taskArchiveRoot;apps=@($taskArchiveApp);self=$taskArchiveSelf;dataDirectory=$taskData;removeData=$false;parentId=2147483000}|ConvertTo-Json -Compress
+$taskEncodedPlan=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($taskPlan))
+$taskRun='$ProgressPreference=''SilentlyContinue'';$taskPlan=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('''+$taskEncodedPlan+'''))|ConvertFrom-Json'+[Environment]::NewLine+$taskScript
+$taskOldCurrent=[Environment]::CurrentDirectory
+try{
+ [Environment]::CurrentDirectory=$taskArchiveRoot
+ & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($taskRun)))
+ if($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath $taskArchiveApp) -or (Test-Path -LiteralPath $taskArchiveSelf)){throw 'Locked archive folder caused uninstall failure'}
+}finally{[Environment]::CurrentDirectory=$taskOldCurrent}
+Write-Output 'Uninstaller: app removal succeeds while archive manager retains extraction directory.'

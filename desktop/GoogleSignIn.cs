@@ -23,7 +23,6 @@ internal static class GoogleSignIn {
         using (var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(25) }) {
             Dictionary<string,object> config;
             using (var configRequest = new HttpRequestMessage(HttpMethod.Get, new Uri(origin,"/api/auth/config"))) {
-                if (!DesktopApp.AddServiceAccess(configRequest, origin) && !origin.IsLoopback) throw new Exception("На этом ПК не настроен доступ к закрытому облаку. Сначала восстановите служебный доступ.");
                 configRequest.Headers.ConnectionClose = true;
                 using (var configResponse = await client.SendAsync(configRequest)) {
                     if (!configResponse.IsSuccessStatusCode) throw new Exception("Облачный вход пока недоступен. Дождитесь настройки Google владельцем приложения.");
@@ -62,7 +61,6 @@ internal static class GoogleSignIn {
                         string code=query["code"];if(string.IsNullOrEmpty(code)){await Reply(stream,"Google не передал код входа.");continue;}
                         var body = Json.Serialize(new Dictionary<string,string>{{"code",code},{"codeVerifier",verifier},{"redirectUri",redirect},{"nonce",nonce}});
                         using(var request=new HttpRequestMessage(HttpMethod.Post,new Uri(origin,"/api/auth/google"))) {
-                            if (!DesktopApp.AddServiceAccess(request, origin) && !origin.IsLoopback) throw new Exception("Не удалось прочитать настройку доступа к закрытому облаку.");
                             request.Headers.ConnectionClose = true;
                             request.Headers.Add("Origin",origin.GetLeftPart(UriPartial.Authority));
                             request.Content=new StringContent(body,Encoding.UTF8,"application/json");

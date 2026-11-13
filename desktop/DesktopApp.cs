@@ -16,28 +16,11 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
 internal static class DesktopApp {
-    internal const string Version = "0.2.0";
+    internal const string Version = "0.2.1";
     internal const string SiteUrl = "https://pixel-studio-nov12-26.recentlens.chatgpt.site";
     internal const string LocalOrigin = "https://pixel-studio.local";
     internal static readonly string DataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PixelStudio");
     [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
-    // This per-user credential is provisioned separately; it is never an EXE
-    // resource, browser cookie, JavaScript value, or part of the source archive.
-    internal static bool AddServiceAccess(HttpRequestMessage request, Uri backend) {
-        Uri configured = new Uri(SiteUrl);
-        string expected = configured.GetLeftPart(UriPartial.Authority);
-        if (backend.Scheme != "https" || backend.GetLeftPart(UriPartial.Authority) != expected || request.RequestUri == null || request.RequestUri.Scheme != "https" || request.RequestUri.GetLeftPart(UriPartial.Authority) != expected) return false;
-        string path = Path.Combine(DataDirectory, "service-access.bin");
-        try {
-            if (!File.Exists(path) || new FileInfo(path).Length > 131072) return false;
-            byte[] plaintext = ProtectedData.Unprotect(File.ReadAllBytes(path), null, DataProtectionScope.CurrentUser);
-            try {
-                string token = Encoding.UTF8.GetString(plaintext).Trim();
-                if (token.Length < 1 || token.Length > 16384 || token.IndexOfAny(new char[] { '\r', '\n' }) >= 0) return false;
-                return request.Headers.TryAddWithoutValidation("OAI-Sites-Authorization", "Bearer " + token);
-            } finally { Array.Clear(plaintext, 0, plaintext.Length); }
-        } catch { return false; }
-    }
     internal static int Run(string[] args) {
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         string runtime = Path.Combine(DataDirectory, "Runtime", "1.0.4314.35");
@@ -151,6 +134,7 @@ internal sealed class StudioWindow : Form {
     private readonly string uiDirectory;
     private readonly CookieContainer cookies = new CookieContainer();
     private readonly HttpClient client;
+    private readonly DesktopUpdater updater = new DesktopUpdater();
     private bool closeApproved;
     private bool checkingClose;
     private bool signingIn;
@@ -171,6 +155,16 @@ internal sealed class StudioWindow : Form {
         BackColor = Color.FromArgb(22, 24, 27);
         Icon = Icon.ExtractAssociatedIcon(Assembly.GetExecutingAssembly().Location);
         web.Dock = DockStyle.Fill; web.DefaultBackgroundColor = BackColor; Controls.Add(web);
+        // WebView2 raises browser accelerators through WinForms before DOM
+        // keydown. Forward editor commands, including keys reserved by Edge.
+        web.KeyDown += delegate(object sender, KeyEventArgs ev) {
+            if (!ev.Control || ev.Alt || web.CoreWebView2 == null) return;
+            string key = ev.KeyCode == Keys.T ? "t" : ev.KeyCode == Keys.S ? "s" : ev.KeyCode == Keys.O ? "o" : ev.KeyCode == Keys.N ? "n" : null;
+            if (key == null) return;
+            ev.Handled = true; ev.SuppressKeyPress = true;
+            string script = "(document.activeElement||document.body).dispatchEvent(new KeyboardEvent('keydown',{key:'" + key + "',code:'Key" + key.ToUpperInvariant() + "',ctrlKey:true,shiftKey:" + (ev.Shift ? "true" : "false") + ",bubbles:true,cancelable:true}))";
+            BeginInvoke(new Action(async delegate { try { if (!IsDisposed) await web.CoreWebView2.ExecuteScriptAsync(script); } catch { } }));
+        };
         loading.Dock = DockStyle.Fill; loading.BackColor = BackColor;
         status.Dock = DockStyle.Fill; status.TextAlign = ContentAlignment.MiddleCenter;
         status.ForeColor = Color.FromArgb(194, 245, 117); status.Font = new Font("Segoe UI", 16);
@@ -181,7 +175,7 @@ internal sealed class StudioWindow : Form {
         loading.Controls.Add(status); loading.Controls.Add(retry); Controls.Add(loading); loading.BringToFront();
         Shown += delegate { Initialize(); };
         FormClosing += CheckUnsaved;
-        FormClosed += delegate { client.Dispose(); web.Dispose(); };
+        FormClosed += delegate { client.Dispose(); web.Dispose(); try { updater.InstallOnExit(); } catch (Exception error) { MessageBox.Show(error.Message, "Обновление Pixel Studio", MessageBoxButtons.OK, MessageBoxIcon.Information); } };
     }
     private async void CheckUnsaved(object sender, FormClosingEventArgs ev) {
         if (closeApproved || web.CoreWebView2 == null) return;
@@ -232,6 +226,7 @@ internal sealed class StudioWindow : Form {
         if (!Uri.TryCreate(ev.Request.Uri, UriKind.Absolute, out source) || !IsLocalUI(source)) {
             JsonResponse(ev, 403, "Forbidden", "{}"); return;
         }
+        if (source.AbsolutePath.StartsWith("/api/desktop/update", StringComparison.Ordinal)) { UpdateResource(ev, source); return; }
         if (source.AbsolutePath.StartsWith("/api/", StringComparison.Ordinal)) { ProxyApi(sender, ev); return; }
         if (ev.Request.Method != "GET" && ev.Request.Method != "HEAD") { JsonResponse(ev, 405, "Method Not Allowed", "{}"); return; }
         try {
@@ -253,6 +248,19 @@ internal sealed class StudioWindow : Form {
             ev.Response = web.CoreWebView2.Environment.CreateWebResourceResponse(new MemoryStream(body), 200, "OK", "Content-Type: " + type + "\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n");
         } catch { JsonResponse(ev, 404, "Not Found", "{}"); }
     }
+    private async void UpdateResource(CoreWebView2WebResourceRequestedEventArgs ev, Uri source) {
+        var deferral=ev.GetDeferral();
+        try {
+            string path=source.AbsolutePath,method=ev.Request.Method;
+            if(method=="GET"&&path=="/api/desktop/update") { }
+            else if(method=="POST"&&path=="/api/desktop/update/check") await updater.CheckAsync();
+            else if(method=="POST"&&path=="/api/desktop/update/download") await updater.DownloadAsync();
+            else if(method=="POST"&&path=="/api/desktop/update/cancel") updater.Cancel();
+            else { JsonResponse(ev,405,"Method Not Allowed","{}");return; }
+            if(!IsDisposed)JsonResponse(ev,200,"OK",updater.StatusJson());
+        } catch { if(!IsDisposed)JsonResponse(ev,500,"Update Error","{\"error\":\"Не удалось проверить обновление.\"}"); }
+        finally { try { deferral.Complete(); } catch { } }
+    }
     private async void ProxyApi(object sender, CoreWebView2WebResourceRequestedEventArgs ev) {
         var deferral = ev.GetDeferral();
         string route = "/api/other", method = ev.Request.Method.ToUpperInvariant();
@@ -271,11 +279,6 @@ internal sealed class StudioWindow : Form {
             }
             using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25)))
             using (var request = new HttpRequestMessage(new HttpMethod(method), target)) {
-                if (!DesktopApp.AddServiceAccess(request, backend) && !local) {
-                    var missing = new CloudFailure(403, "CLOUD_ACCESS_MISSING", "На этом ПК отсутствует или не читается настройка доступа к закрытому облаку. Нужно восстановить служебный доступ; повторный вход Google это не исправит.");
-                    CloudDiagnostics.Record(DesktopApp.DataDirectory, method, route, missing.Status, missing.Code);
-                    JsonResponse(ev, missing.Status, "Forbidden", missing.Json()); return;
-                }
                 // Do not retain a connection from the previous network/VPN route.
                 request.Headers.ConnectionClose = true;
                 request.Headers.TryAddWithoutValidation("Origin", backend.GetLeftPart(UriPartial.Authority));
@@ -322,6 +325,7 @@ internal sealed class StudioWindow : Form {
             var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(DesktopApp.DataDirectory, local ? "LocalProfile" : "Profile"));
             await web.EnsureCoreWebView2Async(environment);
             web.CoreWebView2.Settings.IsStatusBarEnabled = false;
+            web.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
             web.CoreWebView2.Settings.IsWebMessageEnabled = false;
             web.CoreWebView2.Settings.AreHostObjectsAllowed = false;
             // Virtual-host mappings bypass WebResourceRequested, including /api.

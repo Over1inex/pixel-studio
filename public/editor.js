@@ -28,6 +28,25 @@ function copyCanvas(source) {
   return canvas;
 }
 
+function rasterBounds(canvas) {
+  const {width,height}=canvas, data=canvas.getContext('2d').getImageData(0,0,width,height).data;
+  let left=width,top=height,right=-1,bottom=-1;
+  for(let y=0;y<height;y++)for(let x=0;x<width;x++)if(data[(y*width+x)*4+3]){left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);}
+  return right<0?null:{x:left,y:top,width:right-left+1,height:bottom-top+1};
+}
+
+function transformedRaster(source, original, bounds, method='smooth') {
+  let crop=surface(original.width,original.height);
+  crop.getContext('2d').drawImage(source,original.x,original.y,original.width,original.height,0,0,original.width,original.height);
+  if(method==='smooth')while(crop.width>=bounds.width*2||crop.height>=bounds.height*2){
+    const next=surface(Math.max(1,Math.ceil(Math.max(bounds.width,crop.width/2))),Math.max(1,Math.ceil(Math.max(bounds.height,crop.height/2))));
+    const ctx=next.getContext('2d');ctx.imageSmoothingQuality='high';ctx.drawImage(crop,0,0,next.width,next.height);crop=next;
+  }
+  const output=surface(source.width,source.height),ctx=output.getContext('2d');
+  ctx.imageSmoothingEnabled=method!=='nearest';ctx.imageSmoothingQuality='high';ctx.drawImage(crop,0,0,crop.width,crop.height,bounds.x,bounds.y,bounds.width,bounds.height);
+  return output;
+}
+
 function uid() { return crypto.randomUUID(); }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, Number(value) || 0)); }
 function safeColor(value) { return /^#[\da-f]{6}$/i.test(value) ? value : '#a5a0ff'; }
@@ -76,9 +95,13 @@ export class Editor {
     this.textValue = 'Ваш текст';
     this.fontSize = 80;
     this.shapeFilled = true;
+    this.fillTolerance = 32;
+    this.fillContiguous = true;
     this.selection = null;
     this.busy = false;
     this.drag = null;
+    this.transformState = null;
+    this.transformKeepRatio = true;
     this.playheadMs = 0;
     this.playing = false;
     this.onNotice = message => { void message; };
@@ -142,6 +165,7 @@ export class Editor {
 
   _assertReady() {
     if (this.busy) throw new Error('Дождитесь загрузки проекта.');
+    if (this.transformState) throw new Error('Сначала примените трансформирование (Enter) или отмените его (Esc).');
     if (this.drag) this._cancelDrag();
   }
 
@@ -439,11 +463,12 @@ export class Editor {
     for (const layer of this.layers) {
       if (!layer.visible) continue;
       ctx.globalAlpha = layer.opacity;
+      const transform=includePreview&&this.transformState?.layerId===layer.id?this.transformState:null;
       if (layer.animation) {
-        drawAnimation(ctx, includePreview && this.drag?.layerId === layer.id && this.drag.previewAnimation ? this.drag.previewAnimation : layer.animation, time);
+        drawAnimation(ctx, transform?.previewAnimation||(includePreview && this.drag?.layerId === layer.id && this.drag.previewAnimation ? this.drag.previewAnimation : layer.animation), time);
         continue;
       }
-      const source = includePreview && this.drag?.layerId === layer.id && this.drag.preview ? this.drag.preview : layer.canvas;
+      const source = transform?.preview||(includePreview && this.drag?.layerId === layer.id && this.drag.preview ? this.drag.preview : layer.canvas);
       ctx.drawImage(source, 0, 0);
     }
     ctx.restore();
@@ -484,7 +509,7 @@ export class Editor {
   }
 
   _pointerDown(event) {
-    if (this.busy || this.drag || event.button !== 0 || !this.active) return;
+    if (this.busy || this.drag || this.transformState || event.button !== 0 || !this.active) return;
     event.preventDefault();
     const point = this._position(event);
     if (this.tool === 'eyedropper') {
@@ -614,9 +639,24 @@ export class Editor {
     const start = (startY * this.width + startX) * 4;
     const target = Array.from(data.slice(start, start + 4));
     const color = safeColor(this.color);
-    const replacement = [parseInt(color.slice(1, 3), 16), parseInt(color.slice(3, 5), 16), parseInt(color.slice(5, 7), 16), Math.round(clamp(this.opacity, 0, 1) * 255)];
-    if (target.every((value, index) => value === replacement[index])) return false;
-    const match = (x, y) => { const i = (y * this.width + x) * 4; return data[i] === target[0] && data[i + 1] === target[1] && data[i + 2] === target[2] && data[i + 3] === target[3]; };
+    const replacement = [parseInt(color.slice(1, 3), 16), parseInt(color.slice(3, 5), 16), parseInt(color.slice(5, 7), 16)];
+    const opacity=clamp(this.opacity,0,1);if(opacity===0)return false;
+    const tolerance=clamp(this.fillTolerance,0,255),visited=new Uint8Array(this.width*this.height);
+    const match = (x, y) => {
+      const pixel=y*this.width+x,i=pixel*4;if(visited[pixel]||Math.abs(data[i+3]-target[3])>tolerance)return false;
+      return target[3]===0||[0,1,2].every(channel=>Math.abs(data[i+channel]-target[channel])<=tolerance);
+    };
+    let changed=false;
+    const paint=(x,y)=>{
+      const pixel=y*this.width+x,i=pixel*4;visited[pixel]=1;
+      const oldAlpha=data[i+3]/255,alpha=opacity+oldAlpha*(1-opacity);
+      const rgba=[...replacement.map((value,c)=>Math.round((value*opacity+data[i+c]*oldAlpha*(1-opacity))/alpha)),Math.round(alpha*255)];
+      if(rgba.some((value,c)=>value!==data[i+c])){data.set(rgba,i);changed=true;}
+    };
+    if(!this.fillContiguous){
+      for(let y=0;y<this.height;y++)for(let x=0;x<this.width;x++)if(match(x,y))paint(x,y);
+      if(changed)ctx.putImageData(image,0,0);return changed;
+    }
     // Scan-line fill avoids recursion and keeps the work list small on large canvases.
     const stack = [[startX, startY]];
     while (stack.length) {
@@ -627,14 +667,13 @@ export class Editor {
       while (right < this.width - 1 && match(right + 1, y)) right++;
       let up = false, down = false;
       for (let px = left; px <= right; px++) {
-        const i = (y * this.width + px) * 4;
-        data.set(replacement, i);
+        paint(px,y);
         if (y > 0 && match(px, y - 1)) { if (!up) stack.push([px, y - 1]); up = true; } else up = false;
         if (y < this.height - 1 && match(px, y + 1)) { if (!down) stack.push([px, y + 1]); down = true; } else down = false;
       }
     }
-    ctx.putImageData(image, 0, 0);
-    return true;
+    if(changed)ctx.putImageData(image, 0, 0);
+    return changed;
   }
 
   applyFilter(name) {
@@ -660,7 +699,7 @@ export class Editor {
     const oldWidth = this.width, oldHeight = this.height;
     for (const layer of this.layers) {
       const output = surface(oldHeight, oldWidth), ctx = output.getContext('2d');
-      ctx.translate(oldHeight, 0); ctx.rotate(Math.PI / 2); ctx.drawImage(layer.canvas, 0, 0); layer.canvas = output;
+      ctx.save(); ctx.translate(oldHeight, 0); ctx.rotate(Math.PI / 2); ctx.drawImage(layer.canvas, 0, 0); ctx.restore(); layer.canvas = output;
       if (layer.animation) { const [a,b,c,d,e,f] = layer.animation.matrix; layer.animation = {...layer.animation, matrix: [-b,a,-d,c,oldHeight-f,e]}; }
     }
     this.width = oldHeight; this.height = oldWidth; this.selection = null;
@@ -670,14 +709,109 @@ export class Editor {
   flipHorizontal() {
     this._assertReady();
     if (!this.active) return;
+    const bounds=this.getActiveLayerBounds();if(!bounds)return;
+    const mirrorX=2*bounds.x+bounds.width;
     if (this.active.animation) {
       const [a,b,c,d,e,f] = this.active.animation.matrix;
-      this.active.animation = {...this.active.animation, matrix: [-a,b,-c,d,this.width-e,f]};
+      this.active.animation = {...this.active.animation, matrix: [-a,b,-c,d,mirrorX-e,f]};
       this._refreshAnimationPreview(this.active); this._commit('Отражение GIF-слоя'); return;
     }
     const source = copyCanvas(this.active.canvas), ctx = this.active.canvas.getContext('2d');
-    ctx.clearRect(0, 0, this.width, this.height); ctx.save(); ctx.translate(this.width, 0); ctx.scale(-1, 1); ctx.drawImage(source, 0, 0); ctx.restore();
+    ctx.clearRect(0, 0, this.width, this.height); ctx.save(); ctx.translate(mirrorX, 0); ctx.scale(-1, 1); ctx.drawImage(source, 0, 0); ctx.restore();
     this._commit('Отражение слоя');
+  }
+
+  getActiveLayerBounds() {
+    const layer=this.active;if(!layer)return null;
+    if(!layer.animation)return rasterBounds(layer.canvas);
+    const [a,b,c,d,e,f]=layer.animation.matrix,frame=layer.animation.frames[0].canvas;
+    const corners=[[0,0],[frame.width,0],[0,frame.height],[frame.width,frame.height]].map(([x,y])=>({x:a*x+c*y+e,y:b*x+d*y+f}));
+    const x=Math.min(...corners.map(p=>p.x)),y=Math.min(...corners.map(p=>p.y));
+    return {x,y,width:Math.max(...corners.map(p=>p.x))-x,height:Math.max(...corners.map(p=>p.y))-y};
+  }
+
+  beginTransform() {
+    if(this.transformState)return;
+    this._assertReady();const bounds=this.getActiveLayerBounds();
+    if(!bounds||bounds.width<.001||bounds.height<.001)throw new Error('Выбранный слой пуст. Выберите слой с изображением.');
+    if(!this.active.visible)throw new Error('Выбранный слой скрыт. Покажите его в панели слоёв.');
+    const playing=this.playing;this.pause();
+    this.transformState={layerId:this.activeId,original:{...bounds},bounds:{...bounds},source:this.active.canvas,animation:this.active.animation,preview:null,previewAnimation:null,changed:false,playing,drag:null};
+    this.render();this._notify();
+  }
+
+  previewTransform(bounds,method='smooth') {
+    const state=this.transformState;if(!state)return;
+    const [width,height]=validateDimensions(Math.round(bounds.width),Math.round(bounds.height));
+    if(!Number.isFinite(bounds.x)||!Number.isFinite(bounds.y)||Math.abs(bounds.x)>65536||Math.abs(bounds.y)>65536)throw new Error('Недопустимая позиция слоя.');
+    if(!['smooth','nearest'].includes(method))throw new Error('Неизвестный способ масштабирования.');
+    const target={x:bounds.x,y:bounds.y,width,height};
+    if(state.animation){
+      const sx=width/state.original.width,sy=height/state.original.height,[a,b,c,d,e,f]=state.animation.matrix;
+      const matrix=[a*sx,b*sy,c*sx,d*sy,(e-state.original.x)*sx+target.x,(f-state.original.y)*sy+target.y];
+      if(matrix.some(value=>!Number.isFinite(value)||Math.abs(value)>65536))throw new Error('Слишком большое преобразование GIF-слоя.');
+      state.previewAnimation={...state.animation,matrix};
+    }else state.preview=transformedRaster(state.source,state.original,target,method);
+    state.bounds=target;state.changed=Object.keys(target).some(key=>Math.abs(target[key]-state.original[key])>.001);
+    this.render();this._notify();
+  }
+
+  transformPointerDown(event,handle='move') {
+    const state=this.transformState;if(!state||event.button!==0)return;
+    event.preventDefault();state.drag={pointerId:event.pointerId,handle,start:this._position(event),bounds:{...state.bounds}};
+  }
+
+  transformPointerMove(event) {
+    const state=this.transformState,drag=state?.drag;if(!drag||drag.pointerId!==event.pointerId)return;
+    const p=this._position(event),b=drag.bounds,dx=p.x-drag.start.x,dy=p.y-drag.start.y;
+    if(drag.handle==='move'){this.previewTransform({...b,x:b.x+dx,y:b.y+dy});return;}
+    const west=drag.handle.includes('w'),north=drag.handle.includes('n');
+    let width=Math.max(1,b.width+(west?-dx:dx)),height=Math.max(1,b.height+(north?-dy:dy));
+    if(this.transformKeepRatio!==Boolean(event.shiftKey)){
+      const scale=Math.min(4096/b.width,4096/b.height,Math.sqrt(MAX_PIXELS/(b.width*b.height)),Math.max(1/Math.min(b.width,b.height),(width*b.width+height*b.height)/(b.width*b.width+b.height*b.height)));
+      width=Math.max(1,Math.round(b.width*scale));height=Math.max(1,Math.round(b.height*scale));
+    }else{
+      width=Math.min(4096,Math.round(width));height=Math.min(4096,Math.round(height));
+      if(width*height>MAX_PIXELS)height=Math.floor(MAX_PIXELS/width);
+    }
+    this.previewTransform({x:west?b.x+b.width-width:b.x,y:north?b.y+b.height-height:b.y,width,height});
+  }
+
+  transformPointerUp(event,cancel=false) {
+    const state=this.transformState,drag=state?.drag;if(!drag||drag.pointerId!==event.pointerId)return;
+    if(cancel)this.previewTransform(drag.bounds);else this.transformPointerMove(event);
+    state.drag=null;
+  }
+
+  applyTransform() {
+    const state=this.transformState;if(!state)return;
+    const layer=this.layers.find(item=>item.id===state.layerId);
+    this.transformState=null;
+    if(layer&&state.changed){
+      if(state.previewAnimation){layer.animation=state.previewAnimation;this._refreshAnimationPreview(layer);}else if(state.preview)layer.canvas=state.preview;
+      this._commit('Трансформирование слоя');
+    }else{this.render();this._notify();}
+    if(state.playing)this.play();
+  }
+
+  cancelTransform() {
+    const state=this.transformState;if(!state)return;
+    this.transformState=null;this.render();this._notify();if(state.playing)this.play();
+  }
+
+  resizeActiveLayer(width,height,method='smooth') {
+    this._assertReady();[width,height]=validateDimensions(width,height);this.beginTransform();
+    const b=this.transformState.original;
+    try{this.previewTransform({x:b.x+(b.width-width)/2,y:b.y+(b.height-height)/2,width,height},method);this.applyTransform();}
+    catch(error){this.cancelTransform();throw error;}
+  }
+
+  rotateActiveLayer() {
+    this._assertReady();const bounds=this.getActiveLayerBounds();if(!bounds)throw new Error('Выбранный слой пуст.');
+    const layer=this.active,cx=bounds.x+bounds.width/2,cy=bounds.y+bounds.height/2;
+    if(layer.animation){const [a,b,c,d,e,f]=layer.animation.matrix;layer.animation={...layer.animation,matrix:[-b,a,-d,c,cx+cy-f,cy-cx+e]};this._refreshAnimationPreview(layer);}
+    else{const output=surface(this.width,this.height),ctx=output.getContext('2d');ctx.save();ctx.translate(cx,cy);ctx.rotate(Math.PI/2);ctx.drawImage(layer.canvas,-cx,-cy);ctx.restore();layer.canvas=output;}
+    this._commit('Поворот выбранного слоя на 90°');
   }
 
   resizeCanvas(width, height, method = 'smooth') {
@@ -731,6 +865,7 @@ export class Editor {
 
   destroy() {
     this.pause();
+    this.transformState=null;
     this._cancelDrag();
     Object.entries(this.handlers).forEach(([name, handler]) => this.canvas.removeEventListener(name, handler));
     this.history = []; this.layers = [];

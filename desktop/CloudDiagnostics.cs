@@ -10,7 +10,7 @@ internal sealed class CloudFailure {
     internal string Json() { return new JavaScriptSerializer().Serialize(new { error = Message, code = Code }); }
     internal static CloudFailure UnexpectedResponse(int status) {
         if ((status >= 300 && status < 400) || status == 401 || status == 403)
-            return new CloudFailure(403, "CLOUD_ACCESS", "Сервис не принял доступ этого ПК или запросил вход на своей странице. Нужно проверить служебный доступ к облаку.");
+            return new CloudFailure(403, "CLOUD_ACCESS", "Сервер отклонил подключение или запросил дополнительный вход. Проверьте версию приложения и настройку облачного сервиса.");
         return new CloudFailure(status >= 400 ? status : 502, "CLOUD_RESPONSE", "Вместо данных облака получена страница сервера. Возможен временный сбой сервиса или сетевого посредника. Повторим подключение автоматически.");
     }
     internal static CloudFailure FromException(Exception error) {

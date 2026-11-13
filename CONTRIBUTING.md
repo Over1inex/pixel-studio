@@ -26,9 +26,12 @@ powershell -NoProfile -File .\desktop\build-launcher.ps1
 ```powershell
 npx tsc --noEmit
 node --test tests/*.test.mjs
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test-updater.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test-update-install.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test-native-cloud.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\uninstaller.test.ps1
 npm run build
+node tests/google-project-isolation.mjs
 ```
 
 `npm run build` собирает серверный Worker для Sites. Это отдельная сборка API, она не нужна для обычного запуска EXE.
@@ -57,6 +60,8 @@ npm run dev -- --hostname 127.0.0.1
 
 Для отдельной копии создайте собственный проект Sites. Идентификатор в `.openai/hosting.json` должен принадлежать этому проекту; URL API в `DesktopApp.cs` — соответствовать ему. Подключите свои D1/R2, Google OAuth и разрешённый аккаунт. Сохраните закрытую политику доступа Sites. Публикацию выполняйте через инструменты Sites.
 
-Служебный ключ доступа не включается в исходники или EXE. Нативный клиент читает `%LOCALAPPDATA%\PixelStudio\service-access.bin`, зашифрованный DPAPI `CurrentUser`. Для другого ПК или пользователя Windows владелец сервиса отдельно настраивает доступ. Подробности — в [GOOGLE-SETUP.md](GOOGLE-SETUP.md).
+В текущей конфигурации адрес API публичный, данные защищены Google-сеансом и проверкой owner_id. Служебный ключ на ПК не требуется. Для своего хостинга используйте свои Google OAuth credentials и D1/R2. Подробности — в [GOOGLE-SETUP.md](GOOGLE-SETUP.md).
 
 Не добавляйте в коммиты или исходные архивы секреты, `.dev.vars`, `service-access.bin`, файлы сеансов, локальные базы, профили WebView2, `node_modules`, `work`, `dist`, `desktop-ui-dist`, EXE или личные изображения. Готовые исполняемые файлы поставляются отдельно от исходного кода.
+
+Обновления клиента: `desktop/DesktopUpdater.cs` получает метаданные только официального GitHub-репозитория и проверяет пакет; `desktop/apply-update.ps1` выполняет замену после закрытия. Файлы .previous нужны для отката. Тесты обновления используют отдельные фиктивные EXE в work/ и не меняют установленное приложение. Тест Google-изоляции запускает собранный production Worker в Miniflare с отдельными непостоянными D1/R2; проверяет два синтетических Google-сеанса и не обращается к production.

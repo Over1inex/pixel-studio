@@ -1,4 +1,6 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
+[Environment]::CurrentDirectory = $env:WINDIR
+Set-Location -LiteralPath $env:WINDIR
 Add-Type -AssemblyName System.Windows.Forms
 function Get-FullPath([string]$value) { return [IO.Path]::GetFullPath($value).TrimEnd('\') }
 function Assert-PlainPath([string]$value) {
@@ -48,17 +50,32 @@ try {
             if ($taskApps -contains $taskShell.CreateShortcut($taskShortcut).TargetPath) { Remove-Item -LiteralPath $taskShortcut -Force }
         }
     }
-    foreach ($taskApp in $taskApps) { if (Test-Path -LiteralPath $taskApp) { Remove-Item -LiteralPath $taskApp -Force } }
+    foreach ($taskApp in $taskApps) {
+        if (Test-Path -LiteralPath $taskApp) { Remove-Item -LiteralPath $taskApp -Force }
+        foreach($taskSuffix in @('.previous','.update')){
+            $taskBackup=$taskApp+$taskSuffix
+            if((Test-Path -LiteralPath $taskBackup -PathType Leaf) -and (Get-Item -LiteralPath $taskBackup).VersionInfo.FileDescription -eq 'Pixel Studio'){Remove-Item -LiteralPath $taskBackup -Force}
+        }
+    }
     # The portable package contains only these additional program-owned notices.
     # Shared folders (such as outputs) never have their other files removed.
     if ([IO.Path]::GetFileName($taskRoot) -eq 'Pixel Studio') {
         foreach ($taskName in @('Начните здесь.txt','LICENSE-MIT.txt','GIF-LICENSES.txt','THIRD-PARTY-NOTICES.txt','WebView2-LICENSE.txt','WebView2-NOTICE.txt')) {
             $taskNotice = Join-Path $taskRoot $taskName
             if (Test-Path -LiteralPath $taskNotice -PathType Leaf) { Remove-Item -LiteralPath $taskNotice -Force }
+            foreach($taskSuffix in @('.previous','.update')){if(Test-Path -LiteralPath ($taskNotice+$taskSuffix) -PathType Leaf){Remove-Item -LiteralPath ($taskNotice+$taskSuffix) -Force}}
         }
     }
     if (Test-Path -LiteralPath $taskSelf) { Remove-Item -LiteralPath $taskSelf -Force }
-    if ([IO.Path]::GetFileName($taskRoot) -eq 'Pixel Studio' -and @(Get-ChildItem -LiteralPath $taskRoot -Force).Count -eq 0) { Remove-Item -LiteralPath $taskRoot }
+    foreach($taskSuffix in @('.previous','.update')){
+        $taskBackup=$taskSelf+$taskSuffix
+        if((Test-Path -LiteralPath $taskBackup -PathType Leaf) -and (Get-Item -LiteralPath $taskBackup).VersionInfo.FileDescription -eq 'Удаление Pixel Studio'){Remove-Item -LiteralPath $taskBackup -Force}
+    }
+    if ([IO.Path]::GetFileName($taskRoot) -eq 'Pixel Studio' -and @(Get-ChildItem -LiteralPath $taskRoot -Force).Count -eq 0) {
+        # WinRAR or Explorer can retain a handle to the empty extraction folder.
+        # Program files have already been removed; folder cleanup is best effort.
+        try { Remove-Item -LiteralPath $taskRoot -ErrorAction Stop } catch [IO.IOException] { } catch [UnauthorizedAccessException] { }
+    }
     [Windows.Forms.MessageBox]::Show('Pixel Studio удалён. Ваши сохранённые изображения, проекты и исходники остались на месте.', 'Удаление Pixel Studio') | Out-Null
 } catch {
     [Windows.Forms.MessageBox]::Show(('Не удалось завершить удаление: ' + $_.Exception.Message), 'Удаление Pixel Studio', 'OK', 'Warning') | Out-Null

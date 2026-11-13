@@ -9,7 +9,7 @@ using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 [assembly: AssemblyTitle("Удаление Pixel Studio")]
-[assembly: AssemblyVersion("0.2.0.0")]
+[assembly: AssemblyVersion("0.2.1.0")]
 
 internal static class Uninstaller {
     internal static bool IsChild(string path, string directory) {
@@ -56,6 +56,7 @@ internal static class Uninstaller {
         Process.Start(new ProcessStartInfo {
             FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),
             Arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand " + command,
+            WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System),
             UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden
         });
     }
@@ -64,7 +65,7 @@ internal static class Uninstaller {
 internal sealed class UninstallWindow : Form {
     private readonly CheckBox data = new CheckBox();
     internal UninstallWindow() {
-        Text = "Удаление Pixel Studio 0.2.0"; ClientSize = new Size(520, 335); FormBorderStyle = FormBorderStyle.FixedDialog;
+        Text = "Удаление Pixel Studio 0.2.1"; ClientSize = new Size(520, 335); FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false; MinimizeBox = false; StartPosition = FormStartPosition.CenterScreen; Font = new Font("Segoe UI", 10);
         Icon = Icon.ExtractAssociatedIcon(Assembly.GetExecutingAssembly().Location);
         var title = new Label { Text = "Удалить Pixel Studio с этого ПК?", Font = new Font("Segoe UI", 15, FontStyle.Bold), Location = new Point(24, 22), Size = new Size(475, 40) };
